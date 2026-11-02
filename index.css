@@ -1,0 +1,13 @@
+@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: #FCFCF9;
+}
+
+* { font-family: 'Tajawal', system-ui, -apple-system, sans-serif; }
+html { scroll-behavior: smooth; }
+body { background: var(--surface); color: #111; -webkit-font-smoothing: antialiased; }
+
