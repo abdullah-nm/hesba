@@ -52,11 +52,30 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/health')
-      .then(r => r.json())
-      .then(data => { if (!cancelled) setApiOn(data.configured ? 'on' : 'off'); })
-      .catch(() => { if (!cancelled) setApiOn('down'); });
-    return () => { cancelled = true; };
+    let timer = 0;
+    const check = (attempt: number) => {
+      fetch('/api/health')
+        .then(r => {
+          if (!r.ok) throw new Error('health');
+          return r.json();
+        })
+        .then(data => { if (!cancelled) setApiOn(data.configured ? 'on' : 'off'); })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < 4) timer = window.setTimeout(() => check(attempt + 1), 700 * (attempt + 1));
+          else setApiOn('down');
+        });
+    };
+    check(0);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') check(0);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, []);
 
   const currentText = texts[tab];

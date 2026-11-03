@@ -22,11 +22,11 @@ function readDotEnv() {
   return out;
 }
 
-function currentEnv(fallback) {
+function currentEnv(fallback = {}) {
   const file = readDotEnv();
-  const key = file.API_KEY || fallback.API_KEY || '';
-  let base = file.API_BASE_URL || fallback.API_BASE_URL || '';
-  let model = file.API_MODEL || fallback.API_MODEL || '';
+  const key = file.API_KEY || process.env.API_KEY || fallback.API_KEY || '';
+  let base = file.API_BASE_URL || process.env.API_BASE_URL || fallback.API_BASE_URL || '';
+  let model = file.API_MODEL || process.env.API_MODEL || fallback.API_MODEL || '';
   if (key.startsWith('gsk_')) {
     if (!base || base.includes('openai.com')) base = 'https://api.groq.com/openai/v1';
     if (!model || model.startsWith('gpt-4') || model === 'gpt-4o-mini') model = 'openai/gpt-oss-120b';
@@ -150,49 +150,58 @@ function usesChat(url) {
   return !url || /openai\.com|chat\/completions|\/v1\/?$/.test(url);
 }
 
+function cleanItems(body) {
+  const items = Array.isArray(body?.items) ? body.items.slice(0, 12) : [];
+  return items
+    .filter(item => item && typeof item.raw === 'string' && typeof item.name === 'string')
+    .map(item => {
+      const size = Number(item.sizeMl);
+      return {
+        raw: item.raw.slice(0, 80),
+        name: item.name.slice(0, 80),
+        ...(Number.isFinite(size) && size > 0 && size <= 5000 ? { sizeMl: Math.round(size) } : {}),
+      };
+    });
+}
+
+export function healthPayload(fallback = {}) {
+  return { configured: Boolean(currentEnv(fallback).API_KEY) };
+}
+
+export async function quotePayload(body, fallback = {}) {
+  const live = currentEnv(fallback);
+  const clean = cleanItems(body);
+  if (!live.API_KEY) return { ok: false, reason: 'missing_key', prices: [] };
+  const missing = [];
+  const prices = [];
+  for (const item of clean) {
+    const hit = cache.get(item.raw);
+    if (hit) prices.push({ ...item, priceSar: hit });
+    else missing.push(item);
+  }
+  if (missing.length) {
+    const fresh = usesChat(live.API_BASE_URL) ? await askChat(live, missing) : await askQuote(live, missing);
+    for (const row of fresh) {
+      if (cache.size > 200) cache.clear();
+      cache.set(row.raw, row.priceSar);
+      prices.push(row);
+    }
+  }
+  return { ok: prices.length > 0, prices };
+}
+
 export function quoteApi(env) {
   const attach = server => {
     server.middlewares.use(async (req, res, next) => {
-      const url = req.url || '';
-      const live = currentEnv(env);
+      const url = (req.url || '').split('?')[0];
       if (url === '/api/health' && req.method === 'GET') {
-        send(res, 200, { configured: Boolean(live.API_KEY) });
+        send(res, 200, healthPayload(env));
         return;
       }
       if (url !== '/api/quote' || req.method !== 'POST') return next();
       try {
         const body = await readBody(req);
-        const items = Array.isArray(body.items) ? body.items.slice(0, 12) : [];
-        const clean = items
-          .filter(item => item && typeof item.raw === 'string' && typeof item.name === 'string')
-          .map(item => {
-            const size = Number(item.sizeMl);
-            return {
-              raw: item.raw.slice(0, 80),
-              name: item.name.slice(0, 80),
-              ...(Number.isFinite(size) && size > 0 && size <= 5000 ? { sizeMl: Math.round(size) } : {}),
-            };
-          });
-        if (!live.API_KEY) {
-          send(res, 200, { ok: false, reason: 'missing_key', prices: [] });
-          return;
-        }
-        const missing = [];
-        const prices = [];
-        for (const item of clean) {
-          const hit = cache.get(item.raw);
-          if (hit) prices.push({ ...item, priceSar: hit });
-          else missing.push(item);
-        }
-        if (missing.length) {
-          const fresh = usesChat(live.API_BASE_URL) ? await askChat(live, missing) : await askQuote(live, missing);
-          for (const row of fresh) {
-            if (cache.size > 200) cache.clear();
-            cache.set(row.raw, row.priceSar);
-            prices.push(row);
-          }
-        }
-        send(res, 200, { ok: prices.length > 0, prices });
+        send(res, 200, await quotePayload(body, env));
       } catch (error) {
         send(res, 200, { ok: false, reason: 'upstream', detail: hideSecrets(error?.message), prices: [] });
       }
