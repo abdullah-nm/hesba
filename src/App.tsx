@@ -7,37 +7,124 @@ import {
   type CalculatedItem,
   type CalcOutcome,
   type CustomsType,
+  type PriceOrigin,
 } from './calc';
 
 const formatSAR = (n: number) => {
   if (!isFinite(n) || isNaN(n)) return '—';
   if (n === 0) return '0 ر.س';
-  return new Intl.NumberFormat('ar-SA').format(Math.round(n)) + ' ر.س';
+  const value = Math.round(n * 100) / 100;
+  const digits = Number.isInteger(value) ? 0 : 2;
+  return new Intl.NumberFormat('ar-SA', { minimumFractionDigits: digits, maximumFractionDigits: 2 }).format(value) + ' ر.س';
 };
 
 const TABS: { key: CustomsType; label: string; help: string }[] = [
   {
     key: 'traveler',
     label: 'مسافر',
-    help: 'الإجمالي هنا هو الجمارك والضريبة فقط، لأن ثمن البضاعة مدفوع. سلة ما عدا الجوال تُعفى حتى ٣٠٠٠ ريال، وأول جوالين معفيان.',
+    help: 'الإجمالي هو الجمارك والضريبة فقط. سعر المنتج يظهر لوحده ولا يُضاف إلى الرسوم. سلة ما عدا الجوال تُعفى حتى ٣٠٠٠ ريال، وأول جوالين معفيان.',
   },
   {
     key: 'parcel',
     label: 'شحنة',
-    help: 'الإجمالي يشمل ثمن البضاعة والرسوم. الشحنة حتى ١٠٠٠ ريال بلا جمرك، مع رسم بيان وضريبة ١٥٪.',
+    help: 'الإجمالي هو الجمارك والضريبة فقط. سعر المنتج يظهر لوحده ولا يُضاف إلى الرسوم. الشحنة حتى ١٠٠٠ ريال بلا جمرك، والضريبة ١٥٪.',
   },
 ];
 
-type ApiState = 'loading' | 'on' | 'off' | 'down';
+const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2';
+
+type SourceInfo = { sourceName: string; sourceUrl: string; checkedAt: string; note?: string };
+type VariantOffer = { name: string; priceSar: number; sourceName: string; sourceUrl: string };
 
 type ResultState = {
   type: CustomsType;
+  text: string;
+  parcelWeight: string;
   items: CalculatedItem[];
   warning?: string;
   weightKg: number | null;
+  unitPrices: Array<number | null>;
+  origins: Array<PriceOrigin | null>;
+  sources: Array<SourceInfo | null>;
+  reasons: Array<'unavailable' | 'not_found' | 'ambiguous' | null>;
+  options: Array<VariantOffer[] | null>;
+  notes: Array<string | null>;
 };
 
-const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2';
+function parseMoney(raw: string): number | null {
+  const normalized = raw.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[^\d.]/g, '');
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value <= 0 || value > 1_000_000) return null;
+  return Math.round(value);
+}
+
+function FoundPrice({ id, item, source, onCommit }: { id: string; item: CalculatedItem; source: SourceInfo | null; onCommit: (n: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="mt-3 rounded-2xl bg-black/[0.03] p-4">
+      <p className="text-[12px] font-bold text-black/60">سعر المنتج</p>
+      <p className="mt-1 text-[16px] font-[800]">{formatSAR(item.pricePer)}</p>
+      {item.qty > 1 && (
+        <p className="mt-1 text-[13px] font-bold text-black/70">الكمية {item.qty}، وثمن الكمية {formatSAR(item.totalOutside)}</p>
+      )}
+      {item.priceSource === 'typed' && <p className="mt-1 text-[12px] font-bold text-black/70">السعر مكتوب في الطلب</p>}
+      {item.priceSource === 'manual' && <p className="mt-1 text-[12px] font-bold text-black/70">سعر أدخلته</p>}
+      {source && (
+        <p className="mt-2 text-[12px] font-bold leading-6 text-black/70">
+          المصدر{' '}
+          <a href={source.sourceUrl} target="_blank" rel="noopener noreferrer" className="underline">
+            {source.sourceName}
+          </a>
+          <span className="mx-1">·</span>
+          تاريخ التحقق {source.checkedAt}
+        </p>
+      )}
+      {source?.note && <p className="mt-1 text-[12px] font-bold leading-6 text-black/70">{source.note}</p>}
+      {editing ? (
+        <MoneyField id={id} label="تعديل السعر" initial={String(item.pricePer)} onCommit={onCommit} />
+      ) : (
+        <button type="button" onClick={() => setEditing(true)} className={`mt-3 text-[13px] font-bold underline ${focusRing}`}>
+          تعديل السعر
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MoneyField({ id, label, initial, onCommit }: { id: string; label: string; initial: string; onCommit: (n: number) => void }) {
+  const [draft, setDraft] = useState(initial);
+  useEffect(() => setDraft(initial), [initial]);
+  const commit = () => {
+    const value = parseMoney(draft);
+    if (value) onCommit(value);
+  };
+  return (
+    <label htmlFor={id} className="mt-4 block">
+      <span className="block text-[13px] font-bold leading-6">{label}</span>
+      <span className="mt-2 flex gap-2">
+        <input
+          id={id}
+          inputMode="decimal"
+          dir="ltr"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commit();
+            }
+          }}
+          className={`h-[40px] min-w-0 flex-1 rounded-full bg-black/[0.04] px-4 text-[13px] font-bold ${focusRing}`}
+        />
+        <button type="button" onClick={commit} className={`h-[40px] shrink-0 rounded-full bg-black px-4 text-[13px] font-bold text-white ${focusRing}`}>
+          اعتماد
+        </button>
+      </span>
+    </label>
+  );
+}
+
+type ApiState = 'loading' | 'on' | 'off' | 'down';
 
 export default function App() {
   const [tab, setTab] = useState<CustomsType>('traveler');
@@ -108,39 +195,75 @@ export default function App() {
       setIsLoading(false);
       return;
     }
-    let quotes: Record<string, number> | undefined;
-    let quoteMissed = false;
-    if (preview.ok) {
-      const estimated = preview.items.filter(it => it.priceSource === 'estimate');
-      if (estimated.length) {
-        try {
-          const res = await fetch('/api/quote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: estimated.map(it => ({ raw: it.raw, name: it.name, sizeMl: it.sizeMl })) }),
-          });
-          const data = await res.json();
-          if (data?.ok && Array.isArray(data.prices)) {
-            quotes = {};
-            for (const row of data.prices) {
-              if (row && typeof row.raw === 'string' && Number.isFinite(row.priceSar) && row.priceSar > 0) {
-                quotes[row.raw] = Math.round(row.priceSar);
-              }
-            }
+    if (!preview.ok) {
+      if (runId.current !== my) return;
+      setIsLoading(false);
+      setMessage(preview.message);
+      return;
+    }
+    const unitPrices: Array<number | null> = preview.items.map(item => item.priceSource === 'typed' ? item.pricePer : null);
+    const origins: Array<PriceOrigin | null> = preview.items.map(item => item.priceSource === 'typed' ? 'typed' : null);
+    const sources: Array<SourceInfo | null> = preview.items.map(() => null);
+    const reasons: Array<'unavailable' | 'not_found' | 'ambiguous' | null> = preview.items.map(() => null);
+    const options: Array<VariantOffer[] | null> = preview.items.map(() => null);
+    const notes: Array<string | null> = preview.items.map(() => null);
+    const wanted = preview.items.flatMap((item, index) => unitPrices[index] == null ? [{ raw: item.raw, name: item.name, sizeMl: item.sizeMl }] : []);
+    if (wanted.length) {
+      try {
+        const res = await fetch('/api/quote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: wanted }),
+        });
+        const data = await res.json();
+        if (Array.isArray(data?.prices)) {
+          for (const row of data.prices) {
+            if (row?.via !== 'web' || typeof row.raw !== 'string' || !Number.isFinite(row.priceSar) || row.priceSar <= 0) continue;
+            if (typeof row.sourceName !== 'string' || typeof row.sourceUrl !== 'string' || typeof row.checkedAt !== 'string') continue;
+            preview.items.forEach((item, index) => {
+              if (item.raw !== row.raw || unitPrices[index] != null) return;
+              unitPrices[index] = Math.round(row.priceSar * 100) / 100;
+              origins[index] = 'web';
+              sources[index] = {
+                sourceName: row.sourceName,
+                sourceUrl: row.sourceUrl,
+                checkedAt: row.checkedAt,
+                ...(typeof row.note === 'string' && row.note ? { note: row.note } : {}),
+              };
+            });
           }
-          quoteMissed = !quotes || Object.keys(quotes).length === 0;
-        } catch {
-          quoteMissed = true;
         }
+        if (Array.isArray(data?.failures)) {
+          for (const row of data.failures) {
+            if (typeof row?.raw !== 'string') continue;
+            preview.items.forEach((item, index) => {
+              if (item.raw !== row.raw || unitPrices[index] != null) return;
+              const variants = Array.isArray(row.variants)
+                ? row.variants.filter((variant: VariantOffer) => variant && typeof variant.name === 'string' && typeof variant.sourceUrl === 'string' && Number.isFinite(variant.priceSar) && variant.priceSar > 0)
+                : [];
+              if (row.reason === 'ambiguous' && variants.length >= 1) {
+                reasons[index] = 'ambiguous';
+                notes[index] = typeof row.note === 'string' ? row.note : null;
+                options[index] = variants.map((variant: VariantOffer) => ({
+                  name: variant.name,
+                  priceSar: Math.round(variant.priceSar * 100) / 100,
+                  sourceName: typeof variant.sourceName === 'string' ? variant.sourceName : 'المتجر',
+                  sourceUrl: variant.sourceUrl,
+                }));
+                return;
+              }
+              reasons[index] = row.reason === 'unavailable' ? 'unavailable' : 'not_found';
+            });
+          }
+        }
+      } catch {
+        preview.items.forEach((item, index) => {
+          if (unitPrices[index] == null) reasons[index] = 'unavailable';
+        });
       }
     }
     if (runId.current !== my) return;
-    let outcome = quotes && Object.keys(quotes).length
-      ? calculate({ tab: tabNow, text: txt, parcelWeight: weight, quotes })
-      : preview;
-    if (outcome.ok && quoteMissed) {
-      outcome = { ...outcome, warning: [outcome.warning, 'تعذر جلب السعر من الواجهة، فبقي السعر تقديريًا.'].filter(Boolean).join(' ') };
-    }
+    const outcome = calculate({ tab: tabNow, text: txt, parcelWeight: weight, unitPrices, priceSources: origins });
     setIsLoading(false);
     if (!outcome.ok) {
       setMessage(outcome.message);
@@ -148,17 +271,59 @@ export default function App() {
     }
     setResult({
       type: tabNow,
+      text: txt,
+      parcelWeight: weight,
       items: outcome.items,
       warning: outcome.warning,
       weightKg: outcome.weightKg,
+      unitPrices,
+      origins,
+      sources,
+      reasons,
+      options,
+      notes,
     });
   };
 
-  const totalPay = result ? result.items.reduce((s, it) => s + it.pay, 0) : 0;
-  const totalCustoms = result ? result.items.reduce((s, it) => s + it.customs, 0) : 0;
-  const totalVat = result ? result.items.reduce((s, it) => s + it.vat, 0) : 0;
-  const totalValue = result ? result.items.reduce((s, it) => s + it.totalOutside, 0) : 0;
-  const totalAll = result ? result.items.reduce((s, it) => s + it.total, 0) : 0;
+  const chooseVariant = (index: number, variant: VariantOffer) => {
+    if (!result) return;
+    const unitPrices = result.unitPrices.map((value, itemIndex) => itemIndex === index ? variant.priceSar : value);
+    const origins = result.origins.map((origin, itemIndex) => itemIndex === index ? 'web' as const : origin);
+    const sources = result.sources.map((source, itemIndex) => itemIndex === index ? {
+      sourceName: variant.sourceName,
+      sourceUrl: variant.sourceUrl,
+      checkedAt: new Date().toISOString().slice(0, 10),
+    } : source);
+    const outcome = calculate({
+      tab: result.type,
+      text: result.text,
+      parcelWeight: result.parcelWeight,
+      unitPrices,
+      priceSources: origins,
+    });
+    if (!outcome.ok) return;
+    setResult({ ...result, items: outcome.items, warning: outcome.warning, weightKg: outcome.weightKg, unitPrices, origins, sources });
+  };
+
+  const commitPrice = (index: number, price: number) => {
+    if (!result) return;
+    const unitPrices = result.unitPrices.map((value, itemIndex) => itemIndex === index ? price : value);
+    const origins = result.origins.map((origin, itemIndex) => itemIndex === index ? 'manual' as const : origin);
+    const outcome = calculate({
+      tab: result.type,
+      text: result.text,
+      parcelWeight: result.parcelWeight,
+      unitPrices,
+      priceSources: origins,
+    });
+    if (!outcome.ok) return;
+    setResult({ ...result, items: outcome.items, warning: outcome.warning, weightKg: outcome.weightKg, unitPrices, origins });
+  };
+
+  const pricedItems = result ? result.items.filter(item => item.priceSource !== 'missing') : [];
+  const totalPay = pricedItems.reduce((s, it) => s + it.pay, 0);
+  const totalCustoms = pricedItems.reduce((s, it) => s + it.customs, 0);
+  const totalVat = pricedItems.reduce((s, it) => s + it.vat, 0);
 
   return (
     <div
@@ -230,9 +395,9 @@ export default function App() {
               {hint || (currentText.length > 3200 ? `${currentText.length} / ${MAX_TEXT}` : '')}
             </p>
             <p className="mt-1 text-[12px] font-bold text-black/70" role="status">
-              {apiOn === 'on' && 'أسعار السلع غير المعروفة تُجلب تلقائيًا. المفتاح يبقى على الخادم.'}
-              {apiOn === 'off' && 'السلع غير المعروفة تبقى بسعر تقديري حتى يوضع مفتاح في ملف .env.'}
-              {apiOn === 'down' && 'تعذر الاتصال بخدمة الأسعار. السلع المعروفة تُحسب من الجدول المحلي.'}
+              {apiOn === 'down'
+                ? 'تعذر الاتصال بالبحث. إذا لم يظهر سعر، اكتبه في الحقل.'
+                : 'كل طلب يبحث عن السعر الحالي في مواقع البيع، ولا يُستخدم سعر محفوظ.'}
             </p>
             {tab === 'parcel' && (
               <div className="mt-4">
@@ -270,7 +435,7 @@ export default function App() {
         </div>
 
         <div aria-live="polite" className="mt-6 space-y-3">
-          {isLoading && <p className="sr-only">جاري الحساب</p>}
+              {isLoading && <p className="text-[14px] font-bold" role="status">جاري البحث عن السعر في مواقع البيع…</p>}
           {message && !isLoading && (
             <div role="alert" className="bg-white rounded-[20px] border border-black/[0.06] p-6 text-[15px] font-bold leading-relaxed">
               {message}
@@ -284,7 +449,10 @@ export default function App() {
                   {result.warning}
                 </div>
               )}
-              {result.items.map((it, idx) => (
+              {result.items.map((it, idx) => {
+                const missing = it.priceSource === 'missing';
+                const source = result.sources[idx];
+                return (
                 <article key={`${it.raw}-${idx}`} className="bg-white rounded-[20px] border border-black/[0.06] p-6">
                   <h2 className="text-[18px] font-[800] leading-tight">
                     {it.qty > 1 ? `${it.qty} ${it.name}` : it.name}
@@ -292,56 +460,60 @@ export default function App() {
                   {it.exemptQty > 0 && (
                     <p className="mt-1 text-[12px] font-bold text-black/70">معفى {it.exemptQty} من الجمارك والضريبة</p>
                   )}
-                  <p className="mt-2 text-[14px] text-black/70 font-[500]">
-                    {it.qty} × {formatSAR(it.pricePer)} = {formatSAR(it.totalOutside)}
-                  </p>
-                  {it.priceSource === 'estimate' && <p className="mt-1 text-[12px] font-bold text-black/70">سعر تقديري</p>}
-                  {it.priceSource === 'api' && <p className="mt-1 text-[12px] font-bold text-black/70">سعر من الواجهة</p>}
-                  {it.priceSource === 'typed' && <p className="mt-1 text-[12px] font-bold text-black/70">السعر المكتوب</p>}
+                  {missing ? (
+                    <>
+                      <p className="mt-3 text-[14px] font-bold">
+                        {result.reasons[idx] === 'unavailable'
+                          ? 'تعذر الاتصال بمصادر البحث. أعد المحاولة.'
+                          : result.reasons[idx] === 'ambiguous'
+                            ? (result.notes[idx] || 'اختر المنتج المطابق')
+                            : 'Price not found after searching'}
+                      </p>
+                      {result.reasons[idx] === 'ambiguous' && result.options[idx]?.map(variant => (
+                        <div key={variant.sourceUrl} className="mt-3 rounded-2xl border border-black/10 p-3">
+                          <button type="button" onClick={() => chooseVariant(idx, variant)} className={`block w-full text-right ${focusRing}`}>
+                            <span className="block text-[13px] font-bold">{variant.name}</span>
+                            <span className="mt-1 block text-[12px] font-bold text-black/70">{formatSAR(variant.priceSar)} · {variant.sourceName}</span>
+                          </button>
+                          <a href={variant.sourceUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-[12px] font-bold underline">
+                            صفحة المنتج
+                          </a>
+                        </div>
+                      ))}
+                      {result.reasons[idx] !== 'ambiguous' && (
+                        <MoneyField
+                          id={`price-${idx}`}
+                          label="Add price manually"
+                          initial=""
+                          onCommit={price => commitPrice(idx, price)}
+                        />
+                      )}
+                    </>
+                  ) : (
+                    <FoundPrice id={`price-${idx}`} item={it} source={source} onCommit={price => commitPrice(idx, price)} />
+                  )}
+                  {!missing && (
                   <dl className="mt-5 space-y-2 border-t border-black/[0.06] pt-4">
                     <div className="flex justify-between text-[13px]">
                       <dt className="text-black/70">الجمارك</dt>
                       <dd className="font-bold">{formatSAR(it.customs)}</dd>
                     </div>
-                    {it.bayan > 0 && (
-                      <div className="flex justify-between text-[13px]">
-                        <dt className="text-black/70">البيان</dt>
-                        <dd className="font-bold">{formatSAR(it.bayan)}</dd>
-                      </div>
-                    )}
                     <div className="flex justify-between text-[13px]">
                       <dt className="text-black/70">الضريبة</dt>
                       <dd className="font-bold">{formatSAR(it.vat)}</dd>
                     </div>
-                    {result.type === 'traveler' ? (
-                      <div className="flex justify-between items-end pt-3 mt-3 border-t border-black/[0.06]">
-                        <dt>
-                          <span className="block text-[14px] font-bold">الإجمالي</span>
-                          <span className="block text-[11px] font-bold text-black/60">الجمارك والضريبة</span>
-                        </dt>
-                        <dd className="text-[16px] font-[800]">{formatSAR(it.pay)}</dd>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex justify-between items-end pt-3 mt-3 border-t border-black/[0.06]">
-                          <dt>
-                            <span className="block text-[14px] font-bold">تدفع</span>
-                            <span className="block text-[11px] font-bold text-black/60">الرسوم فقط</span>
-                          </dt>
-                          <dd className="text-[16px] font-[800]">{formatSAR(it.pay)}</dd>
-                        </div>
-                        <div className="flex justify-between items-end">
-                          <dt>
-                            <span className="block text-[12px] font-bold text-black/70">الإجمالي</span>
-                            <span className="block text-[11px] font-bold text-black/60">القيمة مع الرسوم</span>
-                          </dt>
-                          <dd className="text-[12px] font-bold text-black/70">{formatSAR(it.total)}</dd>
-                        </div>
-                      </>
-                    )}
+                    <div className="flex justify-between items-end pt-3 mt-3 border-t border-black/[0.06]">
+                      <dt>
+                        <span className="block text-[14px] font-bold">الإجمالي</span>
+                        <span className="block text-[11px] font-bold text-black/60">الجمارك والضريبة</span>
+                      </dt>
+                      <dd className="text-[16px] font-[800]">{formatSAR(it.pay)}</dd>
+                    </div>
                   </dl>
+                  )}
                 </article>
-              ))}
+                );
+              })}
 
               {result.weightKg != null && (
                 <p className="px-2 text-[12px] font-bold text-black/70">
@@ -349,45 +521,23 @@ export default function App() {
                 </p>
               )}
 
-              {result.items.length > 1 && (
-                <section aria-label="مجموع الطلب" className="bg-black text-white rounded-[20px] p-6">
-                  {result.type === 'traveler' ? (
-                    <>
-                      <div className="flex justify-between text-[13px]">
-                        <span className="text-white/80">الجمارك</span>
-                        <span className="font-bold">{formatSAR(totalCustoms)}</span>
-                      </div>
-                      <div className="flex justify-between mt-2 text-[13px]">
-                        <span className="text-white/80">الضريبة</span>
-                        <span className="font-bold">{formatSAR(totalVat)}</span>
-                      </div>
-                      <div className="flex justify-between items-end mt-4 pt-4 border-t border-white/15">
-                        <span>
-                          <span className="block text-[15px] font-bold">الإجمالي</span>
-                          <span className="block text-[11px] text-white/70">الجمارك والضريبة</span>
-                        </span>
-                        <span className="text-[18px] font-[800]">{formatSAR(totalPay)}</span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex justify-between text-[13px]">
-                        <span className="text-white/80">القيمة</span>
-                        <span className="font-bold">{formatSAR(totalValue)}</span>
-                      </div>
-                      <div className="flex justify-between mt-2 text-[13px]">
-                        <span className="text-white/80">الرسوم</span>
-                        <span className="font-bold">{formatSAR(totalPay)}</span>
-                      </div>
-                      <div className="flex justify-between items-end mt-4 pt-4 border-t border-white/15">
-                        <span>
-                          <span className="block text-[15px] font-bold">الإجمالي</span>
-                          <span className="block text-[11px] text-white/70">القيمة مع الرسوم</span>
-                        </span>
-                        <span className="text-[18px] font-[800]">{formatSAR(totalAll)}</span>
-                      </div>
-                    </>
-                  )}
+              {pricedItems.length > 1 && (
+                <section aria-label="مجموع الرسوم" className="bg-black text-white rounded-[20px] p-6">
+                  <div className="flex justify-between text-[13px]">
+                    <span className="text-white/80">الجمارك</span>
+                    <span className="font-bold">{formatSAR(totalCustoms)}</span>
+                  </div>
+                  <div className="flex justify-between mt-2 text-[13px]">
+                    <span className="text-white/80">الضريبة</span>
+                    <span className="font-bold">{formatSAR(totalVat)}</span>
+                  </div>
+                  <div className="flex justify-between items-end mt-4 pt-4 border-t border-white/15">
+                    <span>
+                      <span className="block text-[15px] font-bold">الإجمالي</span>
+                      <span className="block text-[11px] text-white/70">الجمارك والضريبة</span>
+                    </span>
+                    <span className="text-[18px] font-[800]">{formatSAR(totalPay)}</span>
+                  </div>
                 </section>
               )}
             </>
